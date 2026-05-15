@@ -1,0 +1,60 @@
+name: CI/CD Frontend Despachos
+
+# Trigger: solo se activa con push en la rama deploy
+on:
+  push:
+    branches:
+      - deploy
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Checkout del código
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      # 2. Configurar credenciales AWS desde GitHub Secrets
+      - name: Configurar credenciales AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # 3. Login a Amazon ECR
+      - name: Login a Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # 4. Construir imagen Docker pasando la IP del backend como ARG
+      - name: Build imagen Docker
+        run: |
+          docker build \
+            --build-arg VITE_API_URL=http://${{ secrets.BACKEND_PRIVATE_IP }}:8081 \
+            -t despacho-frontend .
+
+      # 5. Etiquetar y publicar imagen en ECR
+      - name: Tag y Push a ECR
+        run: |
+          docker tag despacho-frontend:latest ${{ secrets.ECR_REPO_URL_FRONTEND }}:latest
+          docker tag despacho-frontend:latest ${{ secrets.ECR_REPO_URL_FRONTEND }}:${{ github.sha }}
+          docker push ${{ secrets.ECR_REPO_URL_FRONTEND }}:latest
+          docker push ${{ secrets.ECR_REPO_URL_FRONTEND }}:${{ github.sha }}
+
+      # 6. Despliegue automático en EC2 Frontend via SSM (sin SSH expuesto)
+      - name: Deploy en EC2 Frontend via SSM
+        run: |
+          aws ssm send-command \
+            --instance-ids ${{ secrets.EC2_FRONTEND_INSTANCE_ID }} \
+            --document-name "AWS-RunShellScript" \
+            --parameters commands='[
+              "aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin ${{ secrets.ECR_REGISTRY }}",
+              "docker pull ${{ secrets.ECR_REPO_URL_FRONTEND }}:latest",
+              "docker stop despacho-frontend || true",
+              "docker rm despacho-frontend || true",
+              "docker run -d --name despacho-frontend -p 80:80 --restart unless-stopped ${{ secrets.ECR_REPO_URL_FRONTEND }}:latest"
+            ]' \
+            --region ${{ secrets.AWS_REGION }}
